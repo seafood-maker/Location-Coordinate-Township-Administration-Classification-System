@@ -2,53 +2,39 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { CoordinateData } from "../types";
 import { CHANGHUA_TOWNSHIPS } from "../constants";
 
-const BATCH_SIZE = 5; 
+const BATCH_SIZE = 3; // 縮小批次，提高穩定性
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(API_KEY);
-
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const identifyTownshipsBatch = async (
   items: CoordinateData[]
 ): Promise<{ id: number; township: string }[]> => {
   
   const itemsText = items.map(item => `ID: ${item.id}, Lat: ${item.lat.toFixed(7)}, Lng: ${item.lng.toFixed(7)}`).join('\n');
-  const townshipList = CHANGHUA_TOWNSHIPS.join(', ');
-
-  const prompt = `
-    你是一個地理專家。請根據經緯度，判斷該位置屬於彰化縣的哪個鄉鎮市區。
+  
+  const prompt = `請辨識以下座標位於彰化縣哪個鄉鎮市區：
+    [${CHANGHUA_TOWNSHIPS.join(',')}]
     
-    有效的清單：[${townshipList}]
-    
-    待處理數據：
+    資料：
     ${itemsText}
 
-    指示：
-    1. 直接根據經緯度判斷。
-    2. 必須嚴格從「有效的清單」中選擇一個最接近的。
-    3. 只回傳 JSON 陣列，格式如：[{"id": 1, "township": "彰化市"}]
-    4. 不要包含任何解釋文字或 Markdown 標籤。
-  `;
+    請只回傳 JSON 陣列格式：[{"id": 1, "township": "彰化市"}]，不要有解釋。`;
 
   try {
-    // 為了穩定性，我們先移除 googleSearch 工具，改用模型內建知識（Gemini 對台灣地理非常熟）
+    if (!API_KEY) throw new Error("API_KEY_MISSING");
+
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    let text = response.text().trim();
+    const text = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '');
     
-    // 強力清理 JSON 文字
-    if (text.includes('[')) {
-      text = text.substring(text.indexOf('['), text.lastIndexOf(']') + 1);
-    }
+    console.log("AI 回傳原始資料:", text);
     
-    console.log("Gemini Response:", text); // 讓你在 F12 可以看到 AI 回傳了什麼
-    return JSON.parse(text) as { id: number; township: string }[];
-
-  } catch (error) {
-    console.error("Gemini API 發生錯誤:", error);
-    return [];
+    const jsonMatch = text.match(/\[.*\]/s);
+    return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+  } catch (error: any) {
+    console.error("Gemini 呼叫失敗，錯誤內容:", error);
+    // 如果是 API Key 錯誤，這裡會顯示原因
+    throw error;
   }
 };
 
@@ -61,39 +47,28 @@ export const processCoordinates = async (
 
   for (let i = 0; i < resultData.length; i += BATCH_SIZE) {
     const batch = resultData.slice(i, i + BATCH_SIZE);
-    
-    batch.forEach(item => {
-        const idx = resultData.findIndex(r => r.id === item.id);
-        if (idx !== -1) resultData[idx].status = 'processing';
-    });
+    batch.forEach(item => { item.status = 'processing'; });
     onProgress(processedCount, [...resultData]);
 
     try {
-      if (i > 0) await delay(1000); 
-
       const identifications = await identifyTownshipsBatch(batch);
       
       batch.forEach(item => {
         const match = identifications.find(ident => ident.id === item.id);
         const index = resultData.findIndex(r => r.id === item.id);
-        
         if (index !== -1) {
-          if (match && match.township && CHANGHUA_TOWNSHIPS.includes(match.township)) {
-            resultData[index].township = match.township;
-            resultData[index].status = 'completed';
-          } else {
-            resultData[index].status = 'error';
-          }
+          resultData[index].township = match?.township || "辨識失敗";
+          resultData[index].status = match?.township ? 'completed' : 'error';
         }
       });
     } catch (e) {
+      console.error("批次處理中斷:", e);
       batch.forEach(item => {
          const index = resultData.findIndex(r => r.id === item.id);
          if(index !== -1) resultData[index].status = 'error';
       });
     }
-
     processedCount += batch.length;
-    onProgress(processedCount, [...resultData]); 
+    onProgress(processedCount, [...resultData]);
   }
 };
