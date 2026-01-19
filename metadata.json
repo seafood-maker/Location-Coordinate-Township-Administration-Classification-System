@@ -1,0 +1,5 @@
+{
+  "name": "Changhua TWD97 GeoLocator",
+  "description": "A tool to batch convert TWD97 coordinates to WGS84 and identify their corresponding townships in Changhua County using Gemini AI.",
+  "requestFramePermissions": []
+}
