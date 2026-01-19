@@ -1,4 +1,5 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
+import * as XLSX from 'xlsx'; // 引入 Excel 讀取套件
 import { CoordinateData, AppState } from './types';
 import { twd97ToWgs84, parseCoordinates } from './utils/twd97';
 import { processCoordinates } from './services/geminiService';
@@ -24,12 +25,30 @@ const App: React.FC = () => {
     if (!file) return;
 
     const reader = new FileReader();
+    const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+
     reader.onload = (e) => {
-      const text = e.target?.result as string;
+      let text = '';
+      if (isExcel) {
+        const data = e.target?.result;
+        const workbook = XLSX.read(data, { type: 'binary' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        // 將 Excel 轉換為 CSV 文字格式以便解析
+        text = XLSX.utils.sheet_to_csv(worksheet);
+      } else {
+        text = e.target?.result as string;
+      }
+      
       setInputText(text);
       handleParse(text);
     };
-    reader.readAsText(file);
+
+    if (isExcel) {
+      reader.readAsBinaryString(file);
+    } else {
+      reader.readAsText(file);
+    }
   };
 
   const handleParse = (text: string) => {
@@ -57,11 +76,17 @@ const App: React.FC = () => {
   const startProcessing = async () => {
     if (coordinates.length === 0) return;
     
+    // 檢查 API KEY
+    if (!import.meta.env.VITE_GEMINI_API_KEY) {
+      alert("請先設定 VITE_GEMINI_API_KEY 環境變數");
+      return;
+    }
+
     setAppState(AppState.PROCESSING);
     setProcessedCount(0);
 
     await processCoordinates(coordinates, (count, updatedData) => {
-      setProcessedCount(Math.min(count, coordinates.length));
+      setProcessedCount(count);
       setCoordinates(updatedData);
     });
 
@@ -69,199 +94,137 @@ const App: React.FC = () => {
   };
 
   const downloadCSV = () => {
-    const headers = ['ID', 'TWD97_X', 'TWD97_Y', 'Latitude', 'Longitude', 'Township (Changhua)', 'Google Maps Link'];
+    const headers = ['ID', 'TWD97_X', 'TWD97_Y', 'Latitude', 'Longitude', 'Township', 'Maps Link'];
     const rows = coordinates.map(c => 
       `${c.id},${c.originalX},${c.originalY},${c.lat.toFixed(7)},${c.lng.toFixed(7)},${c.township || 'Unknown'},https://www.google.com/maps?q=${c.lat},${c.lng}`
     );
     
-    const csvContent = "\uFEFF" + [headers.join(','), ...rows].join('\n'); // Add BOM for Excel support
+    const csvContent = "\uFEFF" + [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', 'changhua_coordinates_processed.csv');
-    document.body.appendChild(link);
+    link.href = url;
+    link.download = 'processed_coordinates.csv';
     link.click();
-    document.body.removeChild(link);
   };
 
-  // Stats
-  const successCount = coordinates.filter(c => c.status === 'completed' || (c.status === 'error' && c.township)).length;
+  const successCount = coordinates.filter(c => c.status === 'completed').length;
   const progressPercent = coordinates.length > 0 ? Math.round((processedCount / coordinates.length) * 100) : 0;
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+    <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-10 p-4">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="bg-blue-600 p-2 rounded-lg">
-              <MapPinIcon className="h-6 w-6 text-white" />
-            </div>
-            <h1 className="text-xl font-bold text-gray-900">Changhua GeoLocator <span className="text-xs font-normal text-white bg-green-500 px-2 py-0.5 rounded-full ml-2">Search Enhanced</span></h1>
+            <MapPinIcon className="h-8 w-8 text-blue-600" />
+            <h1 className="text-xl font-bold text-gray-900">彰化座標定位器</h1>
           </div>
-          <div className="text-sm text-gray-500">
-             TWD97 to WGS84 Converter & Township Identification
-          </div>
+          <div className="text-sm text-gray-500 font-medium">TWD97 ➜ 鄉鎮市區</div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        
-        {/* Input Section */}
-        <section className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex flex-col md:flex-row gap-6">
-            <div className="flex-1 space-y-4">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <TableCellsIcon className="h-5 w-5 text-gray-500" />
-                1. Upload Coordinates
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 space-y-6">
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <TableCellsIcon className="h-5 w-5 text-blue-500" />
+              1. 上傳檔案 (Excel/CSV/TXT)
+            </h2>
+            <textarea
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="貼上座標 (X Y) 或上傳檔案..."
+              className="w-full h-48 p-3 bg-gray-50 border rounded-lg font-mono text-sm"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="w-full flex items-center justify-center gap-2 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-all"
+            >
+              <ArrowUpTrayIcon className="h-4 w-4" /> 選擇檔案
+            </button>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept=".txt,.csv,.xlsx,.xls"
+              onChange={handleFileUpload}
+            />
+          </div>
+
+          <div className="space-y-4 flex flex-col justify-between">
+            <div className="space-y-2">
+              <h2 className="text-lg font-semibold flex items-center gap-2">
+                <CpuChipIcon className="h-5 w-5 text-purple-500" />
+                2. AI 辨識狀態
               </h2>
-              <p className="text-sm text-gray-600">
-                Paste your TWD97 coordinates (X Y) or upload a text/CSV file. 
-                Example format: <code>198765.123 2678901.456</code>
-              </p>
-              
-              <div className="relative">
-                <textarea
-                  value={inputText}
-                  onChange={(e) => {
-                    setInputText(e.target.value);
-                    if(e.target.value.trim().length > 0) handleParse(e.target.value);
-                  }}
-                  placeholder="Paste coordinates here..."
-                  className="w-full h-40 p-4 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm resize-none"
-                />
-                <div className="absolute bottom-4 right-4 flex gap-2">
-                   <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-medium transition-colors"
-                  >
-                    <ArrowUpTrayIcon className="h-4 w-4" />
-                    Load File
-                  </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    className="hidden" 
-                    accept=".txt,.csv"
-                    onChange={handleFileUpload}
-                  />
+              <div className="p-4 bg-gray-50 rounded-lg border space-y-3">
+                <div className="flex justify-between text-sm">
+                  <span>處理進度</span>
+                  <span>{progressPercent}%</span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div className="bg-blue-600 h-2 rounded-full transition-all" style={{ width: `${progressPercent}%` }} />
+                </div>
+                <div className="flex justify-between text-xs text-gray-500">
+                  <span>總數: {coordinates.length}</span>
+                  <span>成功: {successCount}</span>
                 </div>
               </div>
-              {coordinates.length > 0 && (
-                <div className="flex items-center justify-between bg-blue-50 text-blue-800 px-4 py-2 rounded-lg text-sm">
-                  <span>Found {coordinates.length} coordinates ready for processing.</span>
-                </div>
-              )}
             </div>
 
-            <div className="flex-1 space-y-4 flex flex-col justify-between">
-               <div>
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                    <CpuChipIcon className="h-5 w-5 text-gray-500" />
-                    2. Processing
-                </h2>
-                <p className="text-sm text-gray-600 mt-2">
-                    The system will use AI + Google Search to verify the actual address of each coordinate. 
-                    <br/><span className="text-xs text-blue-600 font-medium">Updated: Now performing live address lookups to ensure border accuracy. Speed: ~5 items per few seconds.</span>
-                </p>
-               </div>
-
-               <div className="bg-gray-50 rounded-lg p-6 border border-gray-200 space-y-4">
-                  <div className="flex justify-between text-sm font-medium text-gray-700">
-                    <span>Progress</span>
-                    <span>{progressPercent}%</span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2.5">
-                    <div 
-                        className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" 
-                        style={{ width: `${progressPercent}%` }}
-                    ></div>
-                  </div>
-                  <div className="flex justify-between text-xs text-gray-500">
-                    <span>Processed: {processedCount} / {coordinates.length}</span>
-                    <span>Success: {successCount}</span>
-                  </div>
-
-                  <button
-                    onClick={startProcessing}
-                    disabled={coordinates.length === 0 || appState === AppState.PROCESSING}
-                    className={`w-full py-3 px-4 rounded-lg font-semibold text-white shadow-sm transition-all
-                        ${coordinates.length === 0 || appState === AppState.PROCESSING 
-                            ? 'bg-gray-400 cursor-not-allowed' 
-                            : 'bg-blue-600 hover:bg-blue-700 active:scale-[0.98]'}`}
-                  >
-                    {appState === AppState.PROCESSING ? 'Searching & Identifying...' : 'Start Search & Identify'}
-                  </button>
-               </div>
-            </div>
+            <button
+              onClick={startProcessing}
+              disabled={coordinates.length === 0 || appState === AppState.PROCESSING}
+              className={`w-full py-4 rounded-lg font-bold text-white shadow-lg transition-all ${
+                coordinates.length === 0 || appState === AppState.PROCESSING ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'
+              }`}
+            >
+              {appState === AppState.PROCESSING ? 'AI 搜尋辨識中...' : '開始辨識'}
+            </button>
           </div>
         </section>
 
-        {/* Results Section */}
         {coordinates.length > 0 && (
-          <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-[600px]">
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-gray-50">
-              <h2 className="text-lg font-semibold text-gray-900">Results Table</h2>
-              <button
-                onClick={downloadCSV}
-                disabled={appState === AppState.PROCESSING}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors
-                    ${appState === AppState.PROCESSING 
-                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
-                        : 'bg-green-600 hover:bg-green-700 text-white'}`}
-              >
-                <ArrowDownTrayIcon className="h-4 w-4" />
-                Download CSV
+          <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="p-4 border-b flex justify-between items-center bg-gray-50">
+              <h3 className="font-bold text-gray-700">結果預覽</h3>
+              <button onClick={downloadCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 transition-all">
+                <ArrowDownTrayIcon className="h-4 w-4" /> 下載 CSV
               </button>
             </div>
-            
-            <div className="flex-1 overflow-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50 sticky top-0 z-10">
+            <div className="overflow-x-auto max-h-[500px]">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-gray-50 sticky top-0">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">ID</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">TWD97 X</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">TWD97 Y</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Lat / Lng (WGS84)</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Township</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Check</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">Status</th>
+                    <th className="p-3 border-b">ID</th>
+                    <th className="p-3 border-b">TWD97 X / Y</th>
+                    <th className="p-3 border-b">鄉鎮市區</th>
+                    <th className="p-3 border-b">地圖</th>
+                    <th className="p-3 border-b">狀態</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="divide-y">
                   {coordinates.map((row) => (
                     <tr key={row.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{row.id}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-900">{row.originalX}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-900">{row.originalY}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        <div>{row.lat.toFixed(6)}</div>
-                        <div>{row.lng.toFixed(6)}</div>
+                      <td className="p-3 text-gray-500">{row.id}</td>
+                      <td className="p-3 font-mono">
+                        {row.originalX.toFixed(0)}, {row.originalY.toFixed(0)}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                      <td className="p-3">
                         {row.township ? (
-                            <span className="text-blue-700 bg-blue-50 px-2 py-1 rounded">{row.township}</span>
-                        ) : (
-                            <span className="text-gray-300">-</span>
-                        )}
+                          <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded font-bold">{row.township}</span>
+                        ) : '-'}
                       </td>
-                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        <a 
-                            href={`https://www.google.com/maps?q=${row.lat},${row.lng}`} 
-                            target="_blank" 
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:text-blue-800 flex items-center gap-1 hover:underline"
-                        >
-                            <ArrowTopRightOnSquareIcon className="h-4 w-4" />
-                            Map
+                      <td className="p-3">
+                        <a href={`https://www.google.com/maps?q=${row.lat},${row.lng}`} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline flex items-center gap-1">
+                          <ArrowTopRightOnSquareIcon className="h-4 w-4" /> 查看
                         </a>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {row.status === 'completed' && <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Done</span>}
-                        {row.status === 'processing' && <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 animate-pulse">Searching...</span>}
-                        {row.status === 'error' && <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">Failed</span>}
-                        {row.status === 'pending' && <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">Pending</span>}
+                      <td className="p-3">
+                        {row.status === 'completed' && <span className="text-green-600">✓ 完成</span>}
+                        {row.status === 'processing' && <span className="text-yellow-600 animate-pulse">● 辨識中</span>}
+                        {row.status === 'error' && <span className="text-red-600">✕ 失敗</span>}
+                        {row.status === 'pending' && <span className="text-gray-400">等待</span>}
                       </td>
                     </tr>
                   ))}
