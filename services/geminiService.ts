@@ -1,13 +1,12 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { CoordinateData } from "../types";
 import { CHANGHUA_TOWNSHIPS } from "../constants";
 
-// Reduced batch size because Google Search takes more time and tokens
 const BATCH_SIZE = 5; 
+// 在 Vite/Vercel 中，前端環境變數需以 VITE_ 開頭
+const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+const genAI = new GoogleGenerativeAI(API_KEY);
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-// Helper to pause execution (to avoid hitting rate limits with search)
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const identifyTownshipsBatch = async (
@@ -18,53 +17,44 @@ export const identifyTownshipsBatch = async (
   const townshipList = CHANGHUA_TOWNSHIPS.join(', ');
 
   const prompt = `
-    Task: Identify the exact Township (鄉鎮市區) in Changhua County (彰化縣) for these coordinates.
+    任務：請辨識以下座標位於彰化縣的哪個「鄉鎮市區」。
     
-    Valid Townships: [${townshipList}]
+    有效的鄉鎮市區列表：[${townshipList}]
     
-    Input Data:
+    待處理數據：
     ${itemsText}
 
-    Instructions:
-    1. USE THE GOOGLE SEARCH TOOL to find the actual address for each latitude/longitude.
-    2. Based on the address found (e.g., "No. 123, Sec 4, Zhangshui Rd, Pitou Township"), extract the Township name.
-    3. Determine the correct township from the 'Valid Townships' list.
-    4. If the search result is near a border, trust the Google Maps address data over the coordinate estimation.
-    5. RETURN ONLY A RAW JSON ARRAY. No markdown, no explanations.
+    指示：
+    1. 使用 GOOGLE SEARCH 工具搜尋每個經緯度的實際地址。
+    2. 從地址中提取正確的鄉鎮市區名稱（例如：地址包含「埤頭鄉」，則回傳「埤頭鄉」）。
+    3. 必須從提供的「有效的鄉鎮市區列表」中選擇。
+    4. 僅回傳原始 JSON 陣列，不要有任何解釋或 Markdown 語法。
     
-    Format:
+    格式範例：
     [{"id": 1, "township": "田尾鄉"}, {"id": 2, "township": "二林鎮"}]
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", // Flash is faster for search tasks
-      contents: prompt,
-      config: {
-        // We use the googleSearch tool to ground the data in reality
-        tools: [{ googleSearch: {} }],
-        // Note: responseSchema is often not supported when tools are enabled in some versions,
-        // so we will parse the text manually to be safe.
-      },
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-1.5-flash",
+      // 啟用 Google Search 工具進行地理定位校正
+      tools: [{ googleSearchRetrieval: {} }] as any,
     });
 
-    let text = response.text;
-    if (!text) return [];
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text();
     
-    // Clean up markdown code blocks if present
-    text = text.trim();
-    if (text.startsWith('```')) {
-      text = text.replace(/^```(json)?/, '').replace(/```$/, '');
-    }
-
-    // Extract the array part just in case there is extra text
+    // 清理可能出現的 markdown 標籤
+    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    
+    // 提取 JSON 部分
     const jsonMatch = text.match(/\[.*\]/s);
     if (jsonMatch) {
       text = jsonMatch[0];
     }
 
-    const result = JSON.parse(text) as { id: number; township: string }[];
-    return result;
+    return JSON.parse(text) as { id: number; township: string }[];
 
   } catch (error) {
     console.error("Gemini Analysis Error:", error);
@@ -83,7 +73,7 @@ export const processCoordinates = async (
   for (let i = 0; i < total; i += BATCH_SIZE) {
     const batch = resultData.slice(i, i + BATCH_SIZE);
     
-    // Mark current batch as processing
+    // 標記為處理中
     batch.forEach(item => {
         const idx = resultData.findIndex(r => r.id === item.id);
         if (idx !== -1) resultData[idx].status = 'processing';
@@ -91,7 +81,7 @@ export const processCoordinates = async (
     onProgress(processedCount, [...resultData]);
 
     try {
-      // Add a small delay between batches to respect rate limits (especially with search tool)
+      // 避免觸發 API 頻率限制
       if (i > 0) await delay(2000); 
 
       const identifications = await identifyTownshipsBatch(batch);
@@ -105,7 +95,6 @@ export const processCoordinates = async (
             resultData[index].township = match.township;
             resultData[index].status = 'completed';
           } else {
-            resultData[index].township = null;
             resultData[index].status = 'error';
           }
         }
