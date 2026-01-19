@@ -3,7 +3,6 @@ import { CoordinateData } from "../types";
 import { CHANGHUA_TOWNSHIPS } from "../constants";
 
 const BATCH_SIZE = 5; 
-// 在 Vite/Vercel 中，前端環境變數需以 VITE_ 開頭
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(API_KEY);
 
@@ -17,47 +16,38 @@ export const identifyTownshipsBatch = async (
   const townshipList = CHANGHUA_TOWNSHIPS.join(', ');
 
   const prompt = `
-    任務：請辨識以下座標位於彰化縣的哪個「鄉鎮市區」。
+    你是一個地理專家。請根據經緯度，判斷該位置屬於彰化縣的哪個鄉鎮市區。
     
-    有效的鄉鎮市區列表：[${townshipList}]
+    有效的清單：[${townshipList}]
     
     待處理數據：
     ${itemsText}
 
     指示：
-    1. 使用 GOOGLE SEARCH 工具搜尋每個經緯度的實際地址。
-    2. 從地址中提取正確的鄉鎮市區名稱（例如：地址包含「埤頭鄉」，則回傳「埤頭鄉」）。
-    3. 必須從提供的「有效的鄉鎮市區列表」中選擇。
-    4. 僅回傳原始 JSON 陣列，不要有任何解釋或 Markdown 語法。
-    
-    格式範例：
-    [{"id": 1, "township": "田尾鄉"}, {"id": 2, "township": "二林鎮"}]
+    1. 直接根據經緯度判斷。
+    2. 必須嚴格從「有效的清單」中選擇一個最接近的。
+    3. 只回傳 JSON 陣列，格式如：[{"id": 1, "township": "彰化市"}]
+    4. 不要包含任何解釋文字或 Markdown 標籤。
   `;
 
   try {
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
-      // 啟用 Google Search 工具進行地理定位校正
-      tools: [{ googleSearchRetrieval: {} }] as any,
-    });
+    // 為了穩定性，我們先移除 googleSearch 工具，改用模型內建知識（Gemini 對台灣地理非常熟）
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
-    let text = response.text();
+    let text = response.text().trim();
     
-    // 清理可能出現的 markdown 標籤
-    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    
-    // 提取 JSON 部分
-    const jsonMatch = text.match(/\[.*\]/s);
-    if (jsonMatch) {
-      text = jsonMatch[0];
+    // 強力清理 JSON 文字
+    if (text.includes('[')) {
+      text = text.substring(text.indexOf('['), text.lastIndexOf(']') + 1);
     }
-
+    
+    console.log("Gemini Response:", text); // 讓你在 F12 可以看到 AI 回傳了什麼
     return JSON.parse(text) as { id: number; township: string }[];
 
   } catch (error) {
-    console.error("Gemini Analysis Error:", error);
+    console.error("Gemini API 發生錯誤:", error);
     return [];
   }
 };
@@ -67,13 +57,11 @@ export const processCoordinates = async (
   onProgress: (processedCount: number, updatedData: CoordinateData[]) => void
 ) => {
   let processedCount = 0;
-  const total = allData.length;
   const resultData = [...allData];
 
-  for (let i = 0; i < total; i += BATCH_SIZE) {
+  for (let i = 0; i < resultData.length; i += BATCH_SIZE) {
     const batch = resultData.slice(i, i + BATCH_SIZE);
     
-    // 標記為處理中
     batch.forEach(item => {
         const idx = resultData.findIndex(r => r.id === item.id);
         if (idx !== -1) resultData[idx].status = 'processing';
@@ -81,8 +69,7 @@ export const processCoordinates = async (
     onProgress(processedCount, [...resultData]);
 
     try {
-      // 避免觸發 API 頻率限制
-      if (i > 0) await delay(2000); 
+      if (i > 0) await delay(1000); 
 
       const identifications = await identifyTownshipsBatch(batch);
       
@@ -91,7 +78,7 @@ export const processCoordinates = async (
         const index = resultData.findIndex(r => r.id === item.id);
         
         if (index !== -1) {
-          if (match && match.township) {
+          if (match && match.township && CHANGHUA_TOWNSHIPS.includes(match.township)) {
             resultData[index].township = match.township;
             resultData[index].status = 'completed';
           } else {
@@ -99,9 +86,7 @@ export const processCoordinates = async (
           }
         }
       });
-
     } catch (e) {
-      console.error("Batch processing failed:", e);
       batch.forEach(item => {
          const index = resultData.findIndex(r => r.id === item.id);
          if(index !== -1) resultData[index].status = 'error';
