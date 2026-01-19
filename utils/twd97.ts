@@ -55,22 +55,20 @@ export const twd97ToWgs84 = (x: number, y: number): { lat: number; lng: number }
 };
 
 export const parseCoordinates = (text: string): { x: number; y: number }[] => {
-  const lines = text.trim().split('\n');
+  // 濾掉標題列並拆分行
+  const lines = text.trim().split('\n').filter(line => !line.includes('點位名稱') && !line.includes('X'));
   const coordinates: { x: number; y: number }[] = [];
 
   for (const line of lines) {
-    // Match common separators: comma, tab, space
-    // Assumes X first, then Y (Easting, Northing)
-    const match = line.trim().match(/([0-9]+\.?[0-9]*)[,\s\t]+([0-9]+\.?[0-9]*)/);
-    if (match && match.length >= 3) {
-      const x = parseFloat(match[1]);
-      const y = parseFloat(match[2]);
-      
-      // Basic validation for TWD97 range in Taiwan
-      // X approx 140000 - 350000, Y approx 2400000 - 2800000
-      if (!isNaN(x) && !isNaN(y)) {
-        coordinates.push({ x, y });
-      }
+    // 支援逗號、Tab 或空白分隔
+    const parts = line.split(/[,\t\s]+/).map(p => p.trim());
+    
+    // 從後往前找數字，通常座標會放在最後兩欄
+    const y = parseFloat(parts[parts.length - 1]);
+    const x = parseFloat(parts[parts.length - 2]);
+
+    if (!isNaN(x) && !isNaN(y) && x > 100000 && y > 1000000) {
+      coordinates.push({ x, y });
     }
   }
   return coordinates;
